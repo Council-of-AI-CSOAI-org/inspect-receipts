@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "inspect-receipts"
+version = "0.1.0"
+description = "Ed25519-signed measurement receipts for Inspect AI eval runs — evidence of what was claimed and when, offline-verifiable. Not certification."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "CSOAI Ltd (Council of AI)", email = "nicholas@csoai.org" }]
+dependencies = [
+  "inspect-ai>=0.3",
+  "cryptography>=42",
+]
+
+[project.scripts]
+inspect-receipts = "inspect_receipts.cli:main"
+
+# Inspect discovers extensions via this entry-point group.
+[project.entry-points.inspect_ai]
+inspect_receipts = "inspect_receipts._hooks"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/inspect_receipts"]
