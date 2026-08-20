@@ -4,16 +4,31 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inspect-receipts"
-version = "0.1.0"
-description = "Ed25519-signed measurement receipts for Inspect AI eval runs — evidence of what was claimed and when, offline-verifiable. Not certification."
+version = "0.2.0"
+description = "Ed25519-signed measurement receipts for Inspect AI eval runs — evidence of what was claimed and when, offline-verifiable against a published did:web key. Measurement, not certification."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "Apache-2.0" }
 authors = [{ name = "CSOAI Ltd (Council of AI)", email = "nicholas@csoai.org" }]
+keywords = ["inspect", "inspect_ai", "evals", "ed25519", "receipts", "did:web", "provenance"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Topic :: Security :: Cryptography",
+]
 dependencies = [
   "inspect-ai>=0.3",
   "cryptography>=42",
 ]
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://csoai.org"
+Repository = "https://github.com/CSOAI-ORG/inspect-receipts"
 
 [project.scripts]
 inspect-receipts = "inspect_receipts.cli:main"

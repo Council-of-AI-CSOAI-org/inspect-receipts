@@ -1,15 +1,23 @@
-"""Inspect AI lifecycle hooks that emit signed receipts.
+"""Inspect AI lifecycle hooks that emit signed measurement receipts.
 
-Opt-in: set INSPECT_RECEIPTS=1 and INSPECT_RECEIPTS_KEY=/path/to/seed (32-byte
-Ed25519 seed). Follows the wandb_weave / mlflow_tracking example-hook style.
+Registered via the ``inspect_ai`` setuptools entry-point group (see
+``pyproject.toml``) — the same mechanism ``inspect-mlflow`` uses. Inspect imports
+this module on startup and the ``@hooks``-decorated class self-registers.
+
+Opt-in: set ``INSPECT_RECEIPTS=1``. Signing is provisioned by the owner via
+``INSPECT_RECEIPTS_KEY`` (path to a 32-byte Ed25519 seed, mode 0600). With no key
+the receipt is emitted UNSIGNED with an explicit status — never fabricated.
 
 Emits:
-  - one TASK receipt on_task_end  (eval id, task spec digest, log file hash)
-  - one RUN receipt  on_run_end   (run id, every produced log file hashed)
+  - one TASK receipt on ``on_task_end`` — canonical EvalLog object digest, signed
+  - one RUN receipt  on ``on_run_end``  — every produced log digested + chained
 
-Hook data objects are owned by the framework and are never mutated here.
-Failures never disrupt an eval: every emission is wrapped defensively (in
-addition to Inspect's own try/except around hooks).
+What is signed is the canonical **EvalLog object model** (see receipt.py:
+``eval_log_digest``), NOT the raw ``.eval`` ZIP bytes, which are version-volatile.
+
+Hook data objects are owned by the framework and are never mutated here. A
+receipt failure must never disrupt an eval: every emission is wrapped
+defensively (in addition to Inspect's own guard around hooks).
 """
 
 from __future__ import annotations
@@ -18,36 +26,69 @@ import os
 
 from inspect_ai.hooks import Hooks, RunEnd, TaskEnd, hooks
 
-from .receipt import ENV_ENABLE, Signer, base_receipt, sha256_file, write_receipt
+from .receipt import (
+    ENV_ENABLE,
+    Signer,
+    base_receipt,
+    canonical_bytes,
+    eval_log_digest,
+    sha256_hex,
+    unsigned,
+    write_receipt,
+)
+
+# Lightweight per-process hash chain: each receipt links the previous one's
+# content_id. This is the SHA-256 hash-chain referenced in the README.
+_LAST_CID: str | None = None
 
 
 def _enabled() -> bool:
     return os.environ.get(ENV_ENABLE, "") == "1"
 
 
+def _envelope(payload: dict) -> dict:
+    """Sign the payload if a key is configured, else return an UNSIGNED receipt."""
+    signer = Signer.from_env()
+    return signer.sign(payload) if signer is not None else unsigned(payload)
+
+
+def _emit(kind: str, data: dict, stem: str) -> None:
+    global _LAST_CID
+    if data.get("prev") is None:
+        data = {**data, "prev": _LAST_CID}
+    receipt = _envelope(base_receipt(kind, data))
+    _LAST_CID = receipt.get("content_id")
+    write_receipt(receipt, stem)
+
+
+def _digest_log(log: object) -> dict:
+    """Canonical object-model digest of one EvalLog, plus its hash."""
+    obj = eval_log_digest(log)
+    return {
+        "eval_log": obj,
+        "eval_log_sha256": sha256_hex(canonical_bytes(obj)),
+        "log_location": getattr(log, "location", None),
+    }
+
+
 @hooks(name="inspect_receipts", description="Signed measurement receipts for eval runs")
 class ReceiptHooks(Hooks):
-    """Emit an Ed25519-signed receipt for each task and each run."""
+    """Emit an Ed25519-signed (or explicitly UNSIGNED) receipt per task and run."""
+
+    def enabled(self) -> bool:
+        return _enabled()
 
     async def on_task_end(self, data: TaskEnd) -> None:
         if not _enabled():
             return
         try:
-            signer = Signer.from_env()
-            if signer is None:
-                return
             log = getattr(data, "log", None)
-            location = getattr(log, "location", None) if log is not None else None
-            payload = base_receipt(
-                "task",
-                {
-                    "eval_id": getattr(data, "eval_id", None),
-                    "run_id": getattr(data, "run_id", None),
-                    "log_location": location,
-                    "log_sha256": sha256_file(location) if location and os.path.exists(location) else None,
-                },
-            )
-            write_receipt(signer.sign(payload), f"task-{payload.get('eval_id') or 'unknown'}")
+            payload = {
+                "eval_id": getattr(data, "eval_id", None),
+                "run_id": getattr(data, "run_id", None),
+                **(_digest_log(log) if log is not None else {}),
+            }
+            _emit("task", payload, f"task-{payload.get('eval_id') or 'unknown'}")
         except Exception:  # noqa: BLE001 — a receipt failure must never break an eval
             pass
 
@@ -55,26 +96,13 @@ class ReceiptHooks(Hooks):
         if not _enabled():
             return
         try:
-            signer = Signer.from_env()
-            if signer is None:
-                return
-            logs = []
-            for log in list(getattr(data, "logs", []) or []):
-                location = getattr(log, "location", None)
-                logs.append(
-                    {
-                        "location": location,
-                        "sha256": sha256_file(location) if location and os.path.exists(location) else None,
-                    }
-                )
-            payload = base_receipt(
-                "run",
-                {
-                    "run_id": getattr(data, "run_id", None),
-                    "exception": repr(getattr(data, "exception", None)) if getattr(data, "exception", None) else None,
-                    "logs": logs,
-                },
-            )
-            write_receipt(signer.sign(payload), f"run-{payload.get('run_id') or 'unknown'}")
+            logs = [_digest_log(log) for log in (getattr(data, "logs", None) or [])]
+            exc = getattr(data, "exception", None)
+            payload = {
+                "run_id": getattr(data, "run_id", None),
+                "exception": repr(exc) if exc else None,
+                "logs": logs,
+            }
+            _emit("run", payload, f"run-{payload.get('run_id') or 'unknown'}")
         except Exception:  # noqa: BLE001
             pass
