@@ -1,0 +1,56 @@
+# .github/workflows/publish.yml  —  drop this into CSOAI-ORG/inspect-receipts
+#
+# Token-free rail (same pattern as the estate's GitHub-release → Zenodo rail):
+# you add the PyPI token ONCE as a repo secret via GitHub's UI; this workflow
+# does twine upload on every GitHub Release. The token never touches a human
+# transcript, an agent, or the working tree — GitHub injects it at run time only.
+#
+# ── ONE-TIME OWNER SETUP (you, in a browser — I never see the token) ──
+#   1. PyPI → Account settings → API tokens → "Add API token"
+#        Scope: "Project: inspect-signed-receipt" (create the project first via a
+#        manual upload, or use an account-scoped token for the very first publish).
+#   2. GitHub → CSOAI-ORG/inspect-receipts → Settings → Secrets and variables →
+#        Actions → New repository secret:
+#        Name:  PYPI_API_TOKEN
+#        Value: pypi-AgEI…  (paste your token here, in GitHub's own field)
+#   3. Publish: GitHub → Releases → Draft a new release → tag v0.2.0 → Publish.
+#        This workflow fires and uploads to PyPI. Done — pip install inspect-signed-receipt.
+#
+# Even better than a token: PyPI Trusted Publishing (OIDC, NO token at all).
+# See the commented `permissions:`/`id-token` block below — enable it on PyPI
+# (Publishing → Add a trusted publisher → this repo + workflow) and delete the
+# password line. Then there is no secret to add at all.
+
+name: publish
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    # For Trusted Publishing (no token), uncomment these two lines and remove
+    # the `password:` line in the upload step:
+    # permissions:
+    #   id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build
+        run: |
+          python -m pip install --upgrade build twine
+          python -m build
+
+      - name: Check metadata
+        run: python -m twine check dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # Delete this line entirely if you enabled Trusted Publishing above.
+          password: ${{ secrets.PYPI_API_TOKEN }}
