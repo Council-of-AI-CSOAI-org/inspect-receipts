@@ -100,9 +100,9 @@ no receipt claims them. Do not rely on any timestamp-authority anchoring here.
   "eval_id": "…", "run_id": "…", "prev": null,
   "eval_log": { "status": "success", "eval": { "eval_id": "…", "task": "…", "model": "…", "dataset": {…} }, "results": {…}, "stats": {…} },
   "eval_log_sha256": "…",
-  "content_id": "sha256(canonical body)",
-  "verify": { "did": "did:web:csoai.org", "command": "inspect-receipts verify <file> --did-web", "anchoring": "Ed25519 + SHA-256 hash-chain only; Rekor/RFC3161/OTS are roadmap." },
-  "signature": { "status": "SIGNED", "alg": "Ed25519", "kid": "did:web:csoai.org#keys-1", "signer_public_key": "…", "sig": "…" }
+  "binding": { "type": "content-hash", "digest_alg": "sha256" },
+  "verify": { "did": "did:web:csoai.org", "canonicalization": "RFC 8785 (JCS)", "command": "inspect-receipts verify <file> --did-web" },
+  "signature": { "status": "SIGNED", "alg": "Ed25519", "kid": "did:web:csoai.org#estate-chain-1", "signer_public_key": "…", "sig": "…" }
 }
 ```
 
@@ -115,6 +115,6 @@ pytest -q            # or: python tests/test_receipt.py
 
 ## Status
 
-`0.2.0`. Coordinate-first: answers Inspect issue
+`0.2.1`. Coordinate-first: answers Inspect issue
 [#4413](https://github.com/UKGovernmentBEIS/inspect_ai/issues/4413) with a common
 signed-receipt envelope. License: Apache-2.0.
