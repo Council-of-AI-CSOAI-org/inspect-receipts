@@ -6,23 +6,15 @@ not certification. Nobody ranked pays; humans never pay.
 
 Schema: csoai.inspect-receipt/0.2
 
-What is signed
---------------
-NOT the raw ``.eval`` bytes. The physical ``.eval`` layout is a
-version-dependent zstd ZIP-of-JSON; hashing those bytes is fragile across
-Inspect releases. Instead we canonicalise the **EvalLog object model** into a
-stable field subset (eval id, task, model, dataset id, scores, timestamps),
-serialise it as deterministic JSON (recursively sorted keys, no whitespace),
-hash it with SHA-256, and sign that hash with Ed25519.
+Canonicalisation
+----------------
+``content_id = sha256(RFC8785-JCS(canonical_body))`` where the canonical body
+excludes ``signature`` and ``content_id``. Implemented in ``canonical.jcs_bytes``.
 
 Trust
 -----
-The signing key NEVER ships with this package. It is provisioned by the owner
-via ``INSPECT_RECEIPTS_KEY`` (a 0600 seed file). The public key is published at
-``did:web:csoai.org`` (``https://csoai.org/.well-known/did.json``) so a stranger
-can verify a receipt offline against a PUBLISHED key — not a key the receipt
-vouches for itself. If no key is configured the hooks emit an **UNSIGNED**
-receipt with an explicit status; a fabricated signature is never produced.
+``verify()`` resolves ``signature.kid`` against a trust anchor (default: live
+``did:web:csoai.org`` document). Self-embedded keys never verify as VALID.
 """
 
 from __future__ import annotations
@@ -41,29 +33,27 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
     Ed25519PublicKey,
 )
 
+from .canonical import canonical_bytes, jcs
+
 SCHEMA = "csoai.inspect-receipt/0.2"
 
-# The canonical published-key location for CSOAI receipts.
+# Live trust root — keys at https://csoai.org/.well-known/did.json (also councilof.ai mirror).
 DID_WEB = "did:web:csoai.org"
 DID_DOC_URL = "https://csoai.org/.well-known/did.json"
-DEFAULT_KID = f"{DID_WEB}#keys-1"
+# Eval / measurement-chain receipts: estate-chain key (pod-held, board chains + eval receipts).
+DEFAULT_KID = f"{DID_WEB}#estate-chain-1"
 
-ENV_ENABLE = "INSPECT_RECEIPTS"          # "1" enables emission
-ENV_KEY = "INSPECT_RECEIPTS_KEY"         # path to a 32-byte Ed25519 seed file
-ENV_KID = "INSPECT_RECEIPTS_KID"         # e.g. did:web:csoai.org#keys-1
-ENV_OUT = "INSPECT_RECEIPTS_DIR"         # output dir (default: ./receipts)
+ENV_ENABLE = "INSPECT_RECEIPTS"
+ENV_KEY = "INSPECT_RECEIPTS_KEY"
+ENV_KID = "INSPECT_RECEIPTS_KID"
+ENV_OUT = "INSPECT_RECEIPTS_DIR"
+
+FORBIDDEN_KIDS = frozenset({None, "", "unpublished-key"})
 
 
 # --------------------------------------------------------------------------- #
-# Canonicalisation + hashing
+# Hashing
 # --------------------------------------------------------------------------- #
-def canonical_bytes(obj: Any) -> bytes:
-    """Deterministic JSON: recursively sorted keys, no whitespace, UTF-8."""
-    return json.dumps(
-        obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-    ).encode("utf-8")
-
-
 def sha256_hex(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -77,14 +67,24 @@ def sha256_file(path: str | Path) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# EvalLog OBJECT-MODEL digest (the thing we actually sign)
+# Binding declaration (what kind of proof this receipt carries)
+# --------------------------------------------------------------------------- #
+def content_hash_binding(*, eval_log_sha256: str | None = None) -> dict[str, Any]:
+    """Declare a content-hash binding — the verifier checks content_id, not Merkle."""
+    out: dict[str, Any] = {"type": "content-hash", "digest_alg": "sha256"}
+    if eval_log_sha256:
+        out["eval_log_sha256"] = eval_log_sha256
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# EvalLog OBJECT-MODEL digest
 # --------------------------------------------------------------------------- #
 def _get(obj: Any, name: str, default: Any = None) -> Any:
     return getattr(obj, name, default) if obj is not None else default
 
 
 def _scores_subset(results: Any) -> list[dict]:
-    """Extract a stable, order-normalised view of the scores + metrics."""
     out: list[dict] = []
     for score in _get(results, "scores", []) or []:
         metrics = {}
@@ -98,18 +98,11 @@ def _scores_subset(results: Any) -> list[dict]:
                 "metrics": metrics,
             }
         )
-    # order-independent: sort by (name, scorer)
     out.sort(key=lambda s: (str(s.get("name")), str(s.get("scorer"))))
     return out
 
 
 def eval_log_digest(log: Any) -> dict:
-    """Canonical, version-stable subset of an EvalLog *object*.
-
-    This is deliberately a small, human-auditable projection of the log — the
-    identity of the measurement, not its full serialized form. New Inspect
-    releases may reshape ``.eval`` on disk without changing this projection.
-    """
     spec = _get(log, "eval")
     dataset = _get(spec, "dataset")
     results = _get(log, "results")
@@ -117,7 +110,6 @@ def eval_log_digest(log: Any) -> dict:
 
     sample_ids = _get(dataset, "sample_ids")
     if isinstance(sample_ids, list):
-        # order-independent identity of the sample set
         sample_ids = sorted(sample_ids, key=str)
 
     return {
@@ -161,10 +153,6 @@ class Signer:
 
     @classmethod
     def from_env(cls) -> "Signer | None":
-        """Build a signer from INSPECT_RECEIPTS_KEY, or None if unconfigured.
-
-        None means: emit an UNSIGNED receipt. It NEVER means fabricate a key.
-        """
         key_path = os.environ.get(ENV_KEY)
         if not key_path:
             return None
@@ -187,9 +175,8 @@ class Signer:
         )
 
     def sign(self, payload: dict) -> dict:
-        """Return payload + content_id + signature envelope (payload not mutated)."""
         body = dict(payload)
-        body["content_id"] = sha256_hex(canonical_bytes(payload))
+        body["content_id"] = sha256_hex(canonical_bytes(_unsigned_body(body)))
         sig = self.key.sign(canonical_bytes(body))
         return {
             **body,
@@ -199,19 +186,14 @@ class Signer:
                 "kid": self.kid,
                 "signer_public_key": self.public_hex,
                 "sig": sig.hex(),
-                "signed_over": "canonical JSON of receipt minus this signature object",
+                "signed_over": "RFC 8785 JCS canonical JSON of receipt minus signature object",
             },
         }
 
 
 def unsigned(payload: dict) -> dict:
-    """Return an UNSIGNED receipt: content_id present, an explicit status, no sig.
-
-    Emitted when no signing key is provisioned. Verifiers must treat this as
-    "content-addressed but NOT attributable to any key".
-    """
     body = dict(payload)
-    body["content_id"] = sha256_hex(canonical_bytes(payload))
+    body["content_id"] = sha256_hex(canonical_bytes(_unsigned_body(body)))
     return {
         **body,
         "signature": {
@@ -226,6 +208,10 @@ def unsigned(payload: dict) -> dict:
     }
 
 
+def _unsigned_body(body: dict) -> dict:
+    return {k: v for k, v in body.items() if k not in ("signature", "content_id")}
+
+
 # --------------------------------------------------------------------------- #
 # did:web published-key resolution
 # --------------------------------------------------------------------------- #
@@ -234,29 +220,43 @@ def _b64url_decode(s: str) -> bytes:
 
 
 def public_keys_from_did_doc(doc: dict) -> dict[str, bytes]:
-    """Map verificationMethod id -> raw 32-byte Ed25519 public key.
+    """Map trust-anchor aliases -> raw 32-byte Ed25519 public key.
 
-    Supports publicKeyJwk (OKP/Ed25519) and publicKeyMultibase (did:key z6Mk…).
+    Indexes each key under:
+      - verificationMethod ``id`` (full DID URL, e.g. ``did:web:csoai.org#estate-chain-1``)
+      - JWK ``kid`` when present (e.g. ``csoai-estate-chain-1``)
+      - bare fragment (e.g. ``estate-chain-1``)
+
+    Receipt ``signature.kid`` MUST match one of these aliases.
     """
     keys: dict[str, bytes] = {}
     for vm in doc.get("verificationMethod", []) or []:
         vid = vm.get("id")
         jwk = vm.get("publicKeyJwk")
+        raw: bytes | None = None
         if isinstance(jwk, dict) and jwk.get("kty") == "OKP" and jwk.get("crv") == "Ed25519":
             try:
-                keys[vid] = _b64url_decode(jwk["x"])
-                continue
+                raw = _b64url_decode(jwk["x"])
             except Exception:  # noqa: BLE001
-                pass
-        mb = vm.get("publicKeyMultibase")
-        if isinstance(mb, str) and mb.startswith("z"):
-            try:
-                raw = _base58btc_decode(mb[1:])
-                # multicodec ed25519-pub prefix 0xed 0x01
-                if raw[:2] == b"\xed\x01":
-                    keys[vid] = raw[2:34]
-            except Exception:  # noqa: BLE001
-                pass
+                raw = None
+        if raw is None:
+            mb = vm.get("publicKeyMultibase")
+            if isinstance(mb, str) and mb.startswith("z"):
+                try:
+                    decoded = _base58btc_decode(mb[1:])
+                    if decoded[:2] == b"\xed\x01":
+                        raw = decoded[2:34]
+                except Exception:  # noqa: BLE001
+                    raw = None
+        if raw is None or not vid:
+            continue
+        keys[vid] = raw
+        if isinstance(jwk, dict):
+            jwk_kid = jwk.get("kid")
+            if isinstance(jwk_kid, str) and jwk_kid:
+                keys[jwk_kid] = raw
+        if "#" in vid:
+            keys[vid.split("#", 1)[1]] = raw
     return keys
 
 
@@ -273,46 +273,77 @@ def _base58btc_decode(s: str) -> bytes:
 
 
 def resolve_did_web(did_url: str = DID_DOC_URL) -> dict[str, bytes]:
-    """Fetch a did:web document over HTTPS and return its Ed25519 public keys.
-
-    Network access is required only for this trust step; core signing and the
-    offline content check need no network.
-    """
     import urllib.request
 
     req = urllib.request.Request(  # noqa: S310
         did_url,
-        headers={"User-Agent": "inspect-receipts/0.2 (+https://csoai.org)", "Accept": "application/json"},
+        headers={
+            "User-Agent": "inspect-receipts/0.2 (+https://councilof.ai)",
+            "Accept": "application/json",
+        },
     )
     with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310
         doc = json.loads(resp.read().decode("utf-8"))
     return public_keys_from_did_doc(doc)
 
 
+def _resolve_kid(kid: str | None, trust_keys: dict[str, bytes]) -> tuple[bytes | None, bool]:
+    if kid in FORBIDDEN_KIDS:
+        return None, False
+    assert kid is not None
+    if kid in trust_keys:
+        return trust_keys[kid], True
+    return None, False
+
+
 # --------------------------------------------------------------------------- #
 # Verification
 # --------------------------------------------------------------------------- #
+@dataclass
+class VerifyResult:
+    valid: bool
+    reason: str
+    key_resolved: bool = False
+    binding_checked: str | None = None
+
+
 def _check_content_id(receipt: dict) -> tuple[bool, str, dict]:
     body = {k: v for k, v in receipt.items() if k != "signature"}
-    unsigned_body = {k: v for k, v in body.items() if k != "content_id"}
+    unsigned_body = _unsigned_body(body)
     expect_cid = sha256_hex(canonical_bytes(unsigned_body))
     if body.get("content_id") != expect_cid:
         return False, f"content_id mismatch (expected {expect_cid[:16]}…)", body
     return True, "", body
 
 
-def verify(receipt: dict, published_key: bytes | None = None) -> tuple[bool, str]:
-    """Offline verification.
+def _check_binding(receipt: dict) -> tuple[bool, str, str | None]:
+    binding = receipt.get("binding")
+    if not isinstance(binding, dict):
+        return False, "missing or invalid binding field", None
+    btype = binding.get("type")
+    if btype == "content-hash":
+        if binding.get("digest_alg") not in (None, "sha256"):
+            return False, f"unsupported digest_alg {binding.get('digest_alg')!r}", None
+        eval_sha = binding.get("eval_log_sha256")
+        if eval_sha is not None:
+            payload_sha = receipt.get("eval_log_sha256")
+            if payload_sha != eval_sha:
+                return False, "binding eval_log_sha256 does not match receipt field", None
+        return True, "", "content-hash"
+    if btype == "merkle":
+        return False, "merkle binding declared but not verified by this verifier", None
+    return False, f"unsupported binding type {btype!r}", None
 
-    - Recomputes ``content_id`` from the canonical body.
-    - For SIGNED receipts, checks the Ed25519 signature.
-    - If ``published_key`` is given (32 raw bytes, e.g. from ``resolve_did_web``),
-      the signature MUST verify under THAT key — this is the did:web trust path,
-      where you verify against a published key rather than the one the receipt
-      carries about itself. If omitted, the receipt's embedded
-      ``signer_public_key`` is used (convenience / integrity only, not trust).
 
-    Returns ``(valid, reason)`` and never raises.
+def verify(
+    receipt: dict,
+    trust_keys: dict[str, bytes] | None = None,
+) -> VerifyResult:
+    """Offline verification with mandatory trust-anchor kid resolution.
+
+    For SIGNED receipts ``trust_keys`` MUST be supplied (typically from
+    ``resolve_did_web()``). Embedded ``signer_public_key`` alone never yields
+    ``valid=True`` — strangers must resolve ``kid`` against a published anchor.
     """
     try:
         sig_env = receipt.get("signature", {})
@@ -320,80 +351,97 @@ def verify(receipt: dict, published_key: bytes | None = None) -> tuple[bool, str
 
         ok, reason, body = _check_content_id(receipt)
         if not ok:
-            return False, f"INVALID — {reason}"
+            return VerifyResult(False, f"INVALID — {reason}")
+
+        b_ok, b_reason, binding_checked = _check_binding(receipt)
+        if not b_ok:
+            return VerifyResult(False, f"INVALID — {b_reason}", binding_checked=None)
 
         if status == "UNSIGNED" or "sig" not in sig_env:
-            return False, "UNSIGNED — content_id valid but receipt carries no signature"
-
-        if published_key is not None:
-            pub = Ed25519PublicKey.from_public_bytes(published_key)
-            key_src = "published did:web key"
-            embedded = sig_env.get("signer_public_key")
-            if embedded and bytes.fromhex(embedded) != published_key:
-                return False, "INVALID — embedded key does not match published did:web key"
-        else:
-            pub = Ed25519PublicKey.from_public_bytes(
-                bytes.fromhex(sig_env["signer_public_key"])
+            return VerifyResult(
+                False,
+                "UNSIGNED — content_id valid but receipt carries no signature",
+                binding_checked=binding_checked,
             )
-            key_src = "embedded key (NOT trust-anchored — resolve kid to trust)"
 
+        kid = sig_env.get("kid")
+        if trust_keys is None:
+            return VerifyResult(
+                False,
+                f"INVALID — no trust anchor; resolve kid {kid!r} via did:web "
+                f"(use verify_against_did_web or pass trust_keys=)",
+                key_resolved=False,
+                binding_checked=binding_checked,
+            )
+
+        published, key_resolved = _resolve_kid(kid, trust_keys)
+        if not key_resolved or published is None:
+            return VerifyResult(
+                False,
+                f"INVALID — kid {kid!r} not found in trust anchor "
+                f"(available: {sorted(trust_keys)})",
+                key_resolved=False,
+                binding_checked=binding_checked,
+            )
+
+        embedded = sig_env.get("signer_public_key")
+        if embedded and bytes.fromhex(embedded) != published:
+            return VerifyResult(
+                False,
+                "INVALID — embedded key does not match published trust-anchor key",
+                key_resolved=True,
+                binding_checked=binding_checked,
+            )
+
+        pub = Ed25519PublicKey.from_public_bytes(published)
         pub.verify(bytes.fromhex(sig_env["sig"]), canonical_bytes(body))
-        return True, f"VALID — signed by {sig_env.get('kid', 'unknown kid')} [{key_src}]"
-    except Exception as e:  # noqa: BLE001 — verification must never raise
-        return False, f"INVALID — {type(e).__name__}: {e}"
+        return VerifyResult(
+            True,
+            f"VALID — signed by {kid} [published trust-anchor key]",
+            key_resolved=True,
+            binding_checked=binding_checked,
+        )
+    except Exception as e:  # noqa: BLE001
+        return VerifyResult(False, f"INVALID — {type(e).__name__}: {e}")
 
 
 def verify_against_did_web(
     receipt: dict, did_url: str = DID_DOC_URL
-) -> tuple[bool, str]:
-    """Resolve the receipt's ``kid`` against a live did:web document and verify.
-
-    This is the stranger's path: fetch the published key, require the signature
-    to verify under it. Falls back to reporting clearly if the kid is not found.
-    """
+) -> VerifyResult:
+    """Stranger path: fetch did:web document and verify with mandatory kid resolution."""
     try:
-        sig_env = receipt.get("signature", {})
-        kid = sig_env.get("kid")
         keys = resolve_did_web(did_url)
-        published = keys.get(kid)
-        if published is None:
-            # kid may be a bare did:web with no fragment; try the first key
-            if len(keys) == 1:
-                published = next(iter(keys.values()))
-            else:
-                return False, (
-                    f"INVALID — kid {kid!r} not found in {did_url} "
-                    f"(available: {sorted(keys)})"
-                )
-        return verify(receipt, published_key=published)
+        return verify(receipt, trust_keys=keys)
     except Exception as e:  # noqa: BLE001
-        return False, f"INVALID — could not resolve did:web: {type(e).__name__}: {e}"
+        return VerifyResult(False, f"INVALID — could not resolve did:web: {type(e).__name__}: {e}")
 
 
 # --------------------------------------------------------------------------- #
 # Receipt envelope
 # --------------------------------------------------------------------------- #
 def base_receipt(kind: str, data: dict) -> dict:
+    eval_log_sha = data.get("eval_log_sha256")
     return {
         "schema": SCHEMA,
-        "kind": kind,  # "run" | "task"
+        "kind": kind,
         "issued_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "register": (
             "Non-repudiable evidence of what was claimed and when. Not proof the "
             "eval is honest, uncontaminated, or correct. Measurement, not certification."
         ),
+        "binding": content_hash_binding(eval_log_sha256=eval_log_sha),
         "verify": {
             "how": (
-                "Recompute content_id over the canonical body, then verify the "
-                "Ed25519 signature against the PUBLISHED key resolved from the "
-                "signature.kid via did:web."
+                "RFC 8785 JCS canonical body → content_id (sha256), then Ed25519 "
+                "signature verified against signature.kid resolved from did:web."
             ),
+            "canonicalization": "RFC 8785 (JCS)",
             "did": DID_WEB,
             "did_document": DID_DOC_URL,
             "command": "inspect-receipts verify <this-file> --did-web",
             "anchoring": (
-                "Ed25519 signature + SHA-256 hash-chain only. Transparency-log / "
-                "RFC3161 / OpenTimestamps anchoring is roadmap, not wired."
+                "Ed25519 signature + SHA-256 content-hash binding only. "
+                "Merkle / RFC3161 / OpenTimestamps anchoring is optional profile, not wired here."
             ),
         },
         **data,

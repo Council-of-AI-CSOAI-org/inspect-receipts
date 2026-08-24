@@ -127,7 +127,7 @@ def _cmd_verify(rest: list[str]) -> int:
     for a in it:
         if a == "--did-web":
             did_web = True
-        elif a.startswith("http://") or a.startswith("https://"):
+        elif a.startswith("http://") or a.startswith("https://") or a.startswith("file://"):
             did_url = a  # optional custom did document URL
         else:
             files.append(a)
@@ -138,11 +138,11 @@ def _cmd_verify(rest: list[str]) -> int:
     for p in files:
         receipt = json.loads(Path(p).read_text(encoding="utf-8"))
         if did_web:
-            ok, reason = verify_against_did_web(receipt, did_url)
+            result = verify_against_did_web(receipt, did_url)
         else:
-            ok, reason = verify(receipt)
-        print(f"{p}: {reason}")
-        failed += 0 if ok else 1
+            result = verify(receipt)
+        print(f"{p}: {result.reason}")
+        failed += 0 if result.valid else 1
     return 1 if failed else 0
 
 

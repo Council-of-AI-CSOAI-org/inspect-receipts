@@ -34,6 +34,7 @@ Repository = "https://github.com/CSOAI-ORG/inspect-receipts"
 [project.scripts]
 inspect-receipts = "inspect_receipts.cli:main"
 
+# Inspect discovers extensions via this entry-point group.
 [project.entry-points.inspect_ai]
 inspect_receipts = "inspect_receipts._hooks"
 

@@ -25,13 +25,17 @@ predicates, and benchmarks stay closed and are not in this repo.
   field subset of the `EvalLog` object — eval id, run id, task, model, dataset
   identity, scores/metrics, timestamps — into deterministic JSON (recursively
   sorted keys, no whitespace), then `SHA-256`-hashes and Ed25519-signs *that*.
-- **Content-addressed + hash-chained.** `content_id = sha256(canonical body)`;
-  each receipt's `prev` links the previous receipt's `content_id`.
-- **Verify against a *published* key.** Signatures are verifiable offline
-  against the CSOAI board-attestation key published at **`did:web:csoai.org`**
-  (`https://csoai.org/.well-known/did.json`, `verificationMethod` /
-  `publicKeyJwk`) — the same key path the live board `/api/gspc` uses. A stranger
-  verifies against the published key, not a key the receipt vouches for itself.
+- **RFC 8785 JCS canonicalisation.** `content_id = sha256(JCS(canonical body))` —
+  UTF-16 code-unit key order, ECMAScript number formatting, `\u` escaping. Not
+  Python `json.dumps(sort_keys=True)`.
+- **Content-addressed + hash-chained.** Each receipt declares a `binding` field
+  (`content-hash` today; `merkle` is an optional profile). Verifiers report
+  `binding_checked` — what was actually checked, not only pass/fail.
+- **Verify against a *published* key (mandatory).** `verify()` fails closed unless
+  `signature.kid` resolves in the trust anchor (default: **`did:web:csoai.org`**
+  at `https://csoai.org/.well-known/did.json`). Self-embedded keys never return
+  `valid=True`. Default signing kid: `did:web:csoai.org#estate-chain-1` (eval /
+  measurement-chain receipts; aligns with the live four-key did document).
 - **No private key ever ships.** The signing key is provisioned by the owner via
   `INSPECT_RECEIPTS_KEY` (a 0600 seed file / secret). With **no** key configured,
   the hook emits an **UNSIGNED** receipt with an explicit `status` — a signature
@@ -52,7 +56,7 @@ Opt-in via env; the hook does nothing unless `INSPECT_RECEIPTS=1`.
 ```bash
 export INSPECT_RECEIPTS=1
 export INSPECT_RECEIPTS_KEY=/run/secrets/inspect_receipts_ed25519.seed  # owner-provisioned, 0600
-export INSPECT_RECEIPTS_KID="did:web:csoai.org#keys-1"                   # optional; default keys-1
+export INSPECT_RECEIPTS_KID="did:web:csoai.org#estate-chain-1"           # optional; default estate-chain-1
 export INSPECT_RECEIPTS_DIR=./receipts                                   # optional; default ./receipts
 
 inspect eval my_task.py --model openai/gpt-4o
@@ -62,11 +66,7 @@ inspect eval my_task.py --model openai/gpt-4o
 ## Verify (what a UK AISI maintainer runs)
 
 ```bash
-# offline integrity + signature (embedded key — integrity only)
-inspect-receipts verify receipts/task-*.receipt.json
-
-# trust path: fetch the PUBLISHED key from did:web:csoai.org and require the
-# signature to verify under it
+# Requires trust-anchor resolution (fails closed without --did-web)
 inspect-receipts verify receipts/task-*.receipt.json --did-web
 ```
 

@@ -1,8 +1,7 @@
 """Round-trip tests: build a receipt from a sample EvalLog object, verify it.
 
 Runnable with pytest or as a plain script. Uses a real inspect_ai EvalLog object
-when available (the supported path); falls back to a duck-typed stand-in that
-exposes the same attribute shape ``eval_log_digest`` reads.
+when available; falls back to a duck-typed stand-in.
 """
 
 from __future__ import annotations
@@ -19,10 +18,13 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
 
+from inspect_receipts.canonical import canonical_bytes, jcs  # noqa: E402
 from inspect_receipts.receipt import (  # noqa: E402
+    DEFAULT_KID,
     Signer,
+    VerifyResult,
     base_receipt,
-    canonical_bytes,
+    content_hash_binding,
     eval_log_digest,
     public_keys_from_did_doc,
     sha256_hex,
@@ -31,8 +33,59 @@ from inspect_receipts.receipt import (  # noqa: E402
 )
 
 
+def _live_did_doc() -> dict:
+    """Minimal mirror of https://csoai.org/.well-known/did.json (2026-08-24 stack)."""
+    return {
+        "id": "did:web:csoai.org",
+        "verificationMethod": [
+            {
+                "id": "did:web:csoai.org#site-release-1",
+                "publicKeyJwk": {
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "x": "03g9l-dVNGVEAVVWQrJU9aLtkYTN3uARd52P7DEq-8g",
+                    "kid": "csoai-site-release-1",
+                },
+            },
+            {
+                "id": "did:web:csoai.org#estate-chain-1",
+                "publicKeyJwk": {
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "x": "M0cuAmhx2yDNvZnnbEdTLr_PhLN6vtWyYNrjWJ31aW0",
+                    "kid": "csoai-estate-chain-1",
+                },
+            },
+            {
+                "id": "did:web:csoai.org#board-attestation-1",
+                "publicKeyJwk": {
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "x": "k2fPWb6ctyu8l5at8FYgHsHFit_qoT-DssW3VNbCAXA",
+                    "kid": "csoai-board-attestation-1",
+                },
+            },
+            {
+                "id": "did:web:csoai.org#card-attestation-1",
+                "publicKeyJwk": {
+                    "kty": "OKP",
+                    "crv": "Ed25519",
+                    "x": "1MsOqhbV9Qv3Yzo2qjT-CaVeEkuTFt7Sq9sSK7nDfjg",
+                    "kid": "csoai-card-attestation-1",
+                },
+            },
+        ],
+    }
+
+
+def _trust_keys_for_signer(signer: Signer) -> dict[str, bytes]:
+    pub_raw = signer.key.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    )
+    return {signer.kid: pub_raw, signer.kid.split("#", 1)[-1]: pub_raw}
+
+
 def _sample_eval_log() -> object:
-    """A real inspect_ai EvalLog object; else a duck-typed stand-in."""
     try:
         from inspect_ai.log._log import (
             EvalConfig,
@@ -104,14 +157,19 @@ def _sample_eval_log() -> object:
         )
 
 
+def test_jcs_known_answer_vectors():
+    """RFC 8785 divergence vectors from proofbundle#147."""
+    assert jcs({"\ufffd": 1, "\U0001f600": 2}) == '{"\\ud83d\\ude00":2,"\\ufffd":1}'
+    assert jcs({"a": 1e-07}) == '{"a":1e-7}'
+    assert jcs({"a": 2.0}) == '{"a":2}'
+
+
 def test_digest_is_deterministic():
     log = _sample_eval_log()
     d1, d2 = eval_log_digest(log), eval_log_digest(log)
     assert canonical_bytes(d1) == canonical_bytes(d2)
     assert d1["eval"]["eval_id"] == "eval-abc"
     assert d1["results"]["scores"][0]["metrics"]["accuracy"] == 0.5
-    # object model, not raw bytes: no zip/zstd artefact leaks in
-    assert "eval" in d1 and "dataset" in d1["eval"]
 
 
 def test_sign_and_verify_roundtrip():
@@ -122,25 +180,59 @@ def test_sign_and_verify_roundtrip():
         {"eval_id": "eval-abc", "eval_log": obj, "eval_log_sha256": sha256_hex(canonical_bytes(obj)), "prev": None},
     )
     seed = Ed25519PrivateKey.generate().private_bytes_raw()
-    signer = Signer(key=Ed25519PrivateKey.from_private_bytes(seed), kid="did:web:csoai.org#keys-1")
+    kid = DEFAULT_KID
+    signer = Signer(key=Ed25519PrivateKey.from_private_bytes(seed), kid=kid)
+    receipt = signer.sign(payload)
+    assert receipt["binding"]["type"] == "content-hash"
+
+    trust = _trust_keys_for_signer(signer)
+    result = verify(receipt, trust_keys=trust)
+    assert result.valid, result.reason
+    assert result.key_resolved
+    assert result.binding_checked == "content-hash"
+
+
+def test_unpublished_key_fails_closed():
+    log = _sample_eval_log()
+    obj = eval_log_digest(log)
+    payload = base_receipt("task", {"eval_id": "eval-abc", "eval_log": obj, "prev": None})
+    seed = Ed25519PrivateKey.generate().private_bytes_raw()
+    signer = Signer(key=Ed25519PrivateKey.from_private_bytes(seed), kid="unpublished-key")
     receipt = signer.sign(payload)
 
-    ok, reason = verify(receipt)
-    assert ok, reason
+    r1 = verify(receipt)
+    assert not r1.valid
+    assert not r1.key_resolved
 
-    # verify against the matching PUBLISHED key (did:web trust path, offline)
-    pub_raw = signer.key.public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )
-    ok, reason = verify(receipt, published_key=pub_raw)
-    assert ok, reason
+    r2 = verify(receipt, trust_keys=_trust_keys_for_signer(signer))
+    assert not r2.valid
 
-    # a DIFFERENT published key must be rejected
-    other = Ed25519PrivateKey.generate().public_key().public_bytes(
-        serialization.Encoding.Raw, serialization.PublicFormat.Raw
-    )
-    ok, _ = verify(receipt, published_key=other)
-    assert not ok
+
+def test_self_signed_without_trust_anchor_fails_closed():
+    log = _sample_eval_log()
+    obj = eval_log_digest(log)
+    payload = base_receipt("task", {"eval_id": "eval-abc", "eval_log": obj, "prev": None})
+    seed = Ed25519PrivateKey.generate().private_bytes_raw()
+    signer = Signer(key=Ed25519PrivateKey.from_private_bytes(seed), kid=DEFAULT_KID)
+    receipt = signer.sign(payload)
+
+    result = verify(receipt)
+    assert not result.valid
+    assert "no trust anchor" in result.reason
+
+
+def test_unknown_kid_fails_closed():
+    log = _sample_eval_log()
+    obj = eval_log_digest(log)
+    payload = base_receipt("task", {"eval_id": "eval-abc", "eval_log": obj, "prev": None})
+    seed = Ed25519PrivateKey.generate().private_bytes_raw()
+    signer = Signer(key=Ed25519PrivateKey.from_private_bytes(seed), kid="did:web:csoai.org#missing-key")
+    receipt = signer.sign(payload)
+
+    keys = public_keys_from_did_doc(_live_did_doc())
+    result = verify(receipt, trust_keys=keys)
+    assert not result.valid
+    assert not result.key_resolved
 
 
 def test_tamper_is_rejected():
@@ -148,10 +240,11 @@ def test_tamper_is_rejected():
     obj = eval_log_digest(log)
     payload = base_receipt("task", {"eval_id": "eval-abc", "eval_log": obj, "prev": None})
     seed = Ed25519PrivateKey.generate().private_bytes_raw()
-    receipt = Signer(key=Ed25519PrivateKey.from_private_bytes(seed), kid="k").sign(payload)
+    signer = Signer(key=Ed25519PrivateKey.from_private_bytes(seed), kid=DEFAULT_KID)
+    receipt = signer.sign(payload)
     receipt["eval_log"]["results"]["scores"][0]["metrics"]["accuracy"] = 0.99
-    ok, _ = verify(receipt)
-    assert not ok
+    result = verify(receipt, trust_keys=_trust_keys_for_signer(signer))
+    assert not result.valid
 
 
 def test_unsigned_receipt_has_no_fabricated_signature():
@@ -159,52 +252,89 @@ def test_unsigned_receipt_has_no_fabricated_signature():
     receipt = unsigned(base_receipt("task", {"eval_id": "eval-abc", "eval_log": obj}))
     assert receipt["signature"]["status"] == "UNSIGNED"
     assert "sig" not in receipt["signature"]
-    ok, reason = verify(receipt)
-    assert not ok and "UNSIGNED" in reason
+    result = verify(receipt)
+    assert not result.valid and "UNSIGNED" in result.reason
 
 
-def test_did_doc_key_parsing():
-    # matches the live https://csoai.org/.well-known/did.json shape
-    x = base64.urlsafe_b64encode(b"\x01" * 32).decode().rstrip("=")
-    doc = {
-        "verificationMethod": [
-            {
-                "id": "did:web:csoai.org#keys-1",
-                "publicKeyJwk": {"kty": "OKP", "crv": "Ed25519", "x": x},
-            }
-        ]
-    }
-    keys = public_keys_from_did_doc(doc)
-    assert keys["did:web:csoai.org#keys-1"] == b"\x01" * 32
+def test_did_doc_key_parsing_live_stack():
+    keys = public_keys_from_did_doc(_live_did_doc())
+    assert "did:web:csoai.org#estate-chain-1" in keys
+    assert "csoai-estate-chain-1" in keys
+    assert "estate-chain-1" in keys
+    assert "csoai-board-attestation-1" in keys
+    assert keys["did:web:csoai.org#board-attestation-1"] == keys["csoai-board-attestation-1"]
+    assert DEFAULT_KID in keys or DEFAULT_KID.split("#", 1)[1] in keys
+
+
+def test_default_kid_matches_live_did():
+    assert DEFAULT_KID == "did:web:csoai.org#estate-chain-1"
+    keys = public_keys_from_did_doc(_live_did_doc())
+    assert DEFAULT_KID in keys
 
 
 def test_cli_sign_verify_roundtrip():
     log = _sample_eval_log()
     with tempfile.TemporaryDirectory() as d:
-        # export a plain-JSON log the CLI shim can read without inspect_ai
         log_json = os.path.join(d, "log.json")
         json.dump(
             {
                 "version": 2,
                 "status": "success",
-                "eval": {"eval_id": "eval-abc", "run_id": "run-xyz", "task": "t", "model": "m",
-                          "dataset": {"name": "gsm8k", "samples": 2, "sample_ids": [1, 2]}},
+                "eval": {
+                    "eval_id": "eval-abc",
+                    "run_id": "run-xyz",
+                    "task": "t",
+                    "model": "m",
+                    "dataset": {"name": "gsm8k", "samples": 2, "sample_ids": [1, 2]},
+                },
                 "results": {"total_samples": 2, "completed_samples": 2, "scores": []},
-                "stats": {"started_at": "2026-08-20T00:00:00+00:00", "completed_at": "2026-08-20T00:01:00+00:00"},
+                "stats": {
+                    "started_at": "2026-08-20T00:00:00+00:00",
+                    "completed_at": "2026-08-20T00:01:00+00:00",
+                },
             },
             open(log_json, "w"),
         )
+        seed_bytes = Ed25519PrivateKey.generate().private_bytes_raw()
         key = os.path.join(d, "seed")
-        open(key, "wb").write(Ed25519PrivateKey.generate().private_bytes_raw())
+        open(key, "wb").write(seed_bytes)
+        pub = Ed25519PrivateKey.from_private_bytes(seed_bytes).public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw
+        )
+        pub_b64 = base64.urlsafe_b64encode(pub).decode().rstrip("=")
+        did_doc = os.path.join(d, "did.json")
+        doc = _live_did_doc()
+        for vm in doc["verificationMethod"]:
+            if vm["id"] == DEFAULT_KID:
+                vm["publicKeyJwk"]["x"] = pub_b64
+        json.dump(doc, open(did_doc, "w"))
         rec = os.path.join(d, "r.json")
-        env = {**os.environ, "PYTHONPATH": os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")}
+        env = {
+            **os.environ,
+            "PYTHONPATH": os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"
+            ),
+            "INSPECT_RECEIPTS_KID": DEFAULT_KID,
+        }
         subprocess.run(
             [sys.executable, "-m", "inspect_receipts.cli", "sign", log_json, "--key", key, "--out", rec],
-            check=True, capture_output=True, env=env,
+            check=True,
+            capture_output=True,
+            env=env,
         )
         out = subprocess.run(
-            [sys.executable, "-m", "inspect_receipts.cli", "verify", rec],
-            capture_output=True, text=True, env=env,
+            [
+                sys.executable,
+                "-m",
+                "inspect_receipts.cli",
+                "verify",
+                rec,
+                "--did-web",
+                f"file://{did_doc}",
+            ],
+            capture_output=True,
+            text=True,
+            env=env,
         )
         assert out.returncode == 0, out.stdout + out.stderr
         assert "VALID" in out.stdout

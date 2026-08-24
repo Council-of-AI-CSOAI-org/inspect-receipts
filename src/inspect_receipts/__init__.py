@@ -7,11 +7,13 @@ ships here; public keys are published at did:web:csoai.org.
 
 from __future__ import annotations
 
+from .canonical import canonical_bytes, jcs, jcs_bytes
 from .receipt import (
     SCHEMA,
     Signer,
+    VerifyResult,
     base_receipt,
-    canonical_bytes,
+    content_hash_binding,
     eval_log_digest,
     resolve_did_web,
     unsigned,
@@ -19,14 +21,18 @@ from .receipt import (
     verify_against_did_web,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 __all__ = [
     "SCHEMA",
     "Signer",
+    "VerifyResult",
     "base_receipt",
     "canonical_bytes",
+    "content_hash_binding",
     "eval_log_digest",
+    "jcs",
+    "jcs_bytes",
     "resolve_did_web",
     "unsigned",
     "verify",
