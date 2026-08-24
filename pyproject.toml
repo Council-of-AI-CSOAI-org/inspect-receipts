@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inspect-signed-receipt"
-version = "0.2.0"
+version = "0.2.1"
 description = "Ed25519-signed measurement receipts for Inspect AI eval runs — evidence of what was claimed and when, offline-verifiable against a published did:web key. Measurement, not certification."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -21,6 +21,7 @@ classifiers = [
 dependencies = [
   "inspect-ai>=0.3",
   "cryptography>=42",
+  "jcs>=0.2.1",
 ]
 
 [project.optional-dependencies]
@@ -33,7 +34,6 @@ Repository = "https://github.com/CSOAI-ORG/inspect-receipts"
 [project.scripts]
 inspect-receipts = "inspect_receipts.cli:main"
 
-# Inspect discovers extensions via this entry-point group.
 [project.entry-points.inspect_ai]
 inspect_receipts = "inspect_receipts._hooks"
 
