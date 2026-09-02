@@ -1,5 +1,7 @@
 # inspect-receipts — Ed25519-signed measurement receipts for Inspect
 
+[![22 axes measured · 14 model fleets · 3 public leader scores · 8 fact runs · TIE is TIE · not a certificate. Three states only: VALID · INVALID · UNCHECKABLE.](https://councilof.ai/badge/gspc.svg)](https://councilof.ai/gspc-verify)
+
 UK AISI's [Inspect](https://github.com/UKGovernmentBEIS/inspect_ai) is the
 standard eval framework, but it has no cryptographic signing of results.
 `inspect-receipts` fills that gap: a small, dependency-light package that hooks
