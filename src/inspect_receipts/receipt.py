@@ -301,10 +301,52 @@ def _resolve_kid(kid: str | None, trust_keys: dict[str, bytes]) -> tuple[bytes |
 # --------------------------------------------------------------------------- #
 @dataclass
 class VerifyResult:
+    """Three states, not two.
+
+    ``valid`` stays a bool so existing callers keep working, but it is no longer the whole
+    answer. ``state`` distinguishes the two facts a boolean collapses:
+
+        VALID        the signature verifies over these bytes
+        INVALID      the bytes disagree with their own signature — a finding about the receipt
+        UNCHECKABLE  the check did not complete, so nothing was established either way
+
+    Why this changed (2026-09-04). Konrad Gruszka measured this package independently on
+    2026-08-20 and published the result in b7n0de/proofbundle INTEROP.md: a proofbundle receipt
+    put through this verifier returned "INVALID — content_id mismatch", while the same package's
+    receipt through his verifier returned "unsupported schema". His answer said "I do not speak
+    this format". Ours said "this is forged".
+
+    It was worse than the measurement showed. An unresolvable ``kid``, a did:web that would not
+    resolve, and any unexpected exception all returned INVALID — so a DNS timeout was reported as
+    a forgery. That is the exact failure this project exists to prevent, in its own code, on PyPI.
+
+    A caller written against the old bool is now SAFER, not broken: UNCHECKABLE carries
+    ``valid=False``, so nothing that previously passed starts passing.
+    """
+
     valid: bool
     reason: str
     key_resolved: bool = False
     binding_checked: str | None = None
+    state: str = "INVALID"
+
+    @property
+    def uncheckable(self) -> bool:
+        return self.state == "UNCHECKABLE"
+
+
+def _valid(reason: str, **kw) -> "VerifyResult":
+    return VerifyResult(True, reason, state="VALID", **kw)
+
+
+def _invalid(reason: str, **kw) -> "VerifyResult":
+    """The bytes disagree with their own signature. A finding about the receipt."""
+    return VerifyResult(False, f"INVALID — {reason}", state="INVALID", **kw)
+
+
+def _uncheckable(reason: str, **kw) -> "VerifyResult":
+    """The check did not complete. Never report this as a forgery."""
+    return VerifyResult(False, f"UNCHECKABLE — {reason}", state="UNCHECKABLE", **kw)
 
 
 def _check_content_id(receipt: dict) -> tuple[bool, str, dict]:
@@ -349,26 +391,37 @@ def verify(
         sig_env = receipt.get("signature", {})
         status = sig_env.get("status")
 
+        # A foreign format is not a forgery. Checking content_id first meant any receipt from
+        # another project failed as INVALID before we had established we could even read it.
+        got_schema = receipt.get("schema")
+        if got_schema is not None and not str(got_schema).startswith("csoai.inspect-receipt/"):
+            return _uncheckable(
+                f"unsupported schema {got_schema!r}, this verifier reads {SCHEMA!r} — "
+                "nothing has been established about this receipt"
+            )
+
         ok, reason, body = _check_content_id(receipt)
         if not ok:
-            return VerifyResult(False, f"INVALID — {reason}")
+            return _invalid(reason)
 
         b_ok, b_reason, binding_checked = _check_binding(receipt)
         if not b_ok:
-            return VerifyResult(False, f"INVALID — {b_reason}", binding_checked=None)
+            return _invalid(b_reason, binding_checked=None)
 
         if status == "UNSIGNED" or "sig" not in sig_env:
+            # Nothing to check is not the same as failing a check.
             return VerifyResult(
                 False,
                 "UNSIGNED — content_id valid but receipt carries no signature",
                 binding_checked=binding_checked,
+                state="UNCHECKABLE",
             )
 
         kid = sig_env.get("kid")
         if trust_keys is None:
-            return VerifyResult(
-                False,
-                f"INVALID — no trust anchor; resolve kid {kid!r} via did:web "
+            # The caller supplied no keys. That is a fact about the call, not the receipt.
+            return _uncheckable(
+                f"no trust anchor; resolve kid {kid!r} via did:web "
                 f"(use verify_against_did_web or pass trust_keys=)",
                 key_resolved=False,
                 binding_checked=binding_checked,
@@ -376,9 +429,10 @@ def verify(
 
         published, key_resolved = _resolve_kid(kid, trust_keys)
         if not key_resolved or published is None:
-            return VerifyResult(
-                False,
-                f"INVALID — kid {kid!r} not found in trust anchor "
+            # An unresolvable kid may mean a stale anchor as easily as a bad receipt. The
+            # sibling verifier rules the same way: KEY_NOT_PINNED is UNCHECKABLE, not INVALID.
+            return _uncheckable(
+                f"kid {kid!r} not found in trust anchor "
                 f"(available: {sorted(trust_keys)})",
                 key_resolved=False,
                 binding_checked=binding_checked,
@@ -386,11 +440,14 @@ def verify(
 
         embedded = sig_env.get("signer_public_key")
         if embedded and bytes.fromhex(embedded) != published:
+            # This one IS a finding about the receipt: it embeds a key that contradicts the
+            # published anchor. Not an unanswered question — a disagreement in the bytes.
             return VerifyResult(
                 False,
                 "INVALID — embedded key does not match published trust-anchor key",
                 key_resolved=True,
                 binding_checked=binding_checked,
+                state="INVALID",
             )
 
         pub = Ed25519PublicKey.from_public_bytes(published)
@@ -400,9 +457,11 @@ def verify(
             f"VALID — signed by {kid} [published trust-anchor key]",
             key_resolved=True,
             binding_checked=binding_checked,
+            state="VALID",
         )
     except Exception as e:  # noqa: BLE001
-        return VerifyResult(False, f"INVALID — {type(e).__name__}: {e}")
+        # An unexpected error is a failure of this verifier, not evidence against the receipt.
+        return _uncheckable(f"verifier error: {type(e).__name__}: {e}")
 
 
 def verify_against_did_web(
@@ -413,7 +472,8 @@ def verify_against_did_web(
         keys = resolve_did_web(did_url)
         return verify(receipt, trust_keys=keys)
     except Exception as e:  # noqa: BLE001
-        return VerifyResult(False, f"INVALID — could not resolve did:web: {type(e).__name__}: {e}")
+        # A DNS failure, a timeout or an unreachable host says nothing about the receipt.
+        return _uncheckable(f"could not resolve did:web: {type(e).__name__}: {e}")
 
 
 # --------------------------------------------------------------------------- #

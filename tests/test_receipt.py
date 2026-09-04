@@ -346,3 +346,43 @@ if __name__ == "__main__":
             fn()
             print(f"PASS {name}")
     print("ALL RECEIPT TESTS PASS")
+
+
+# --- three-state discipline -------------------------------------------------
+# Added 2026-09-04 after Konrad Gruszka (b7n0de) measured this package independently on
+# 2026-08-20 and published the result: a proofbundle receipt through this verifier returned
+# "INVALID — content_id mismatch", while our receipt through his returned "unsupported schema".
+# His verifier said "I do not speak this format". Ours said "this is forged".
+
+def test_foreign_schema_is_uncheckable_not_invalid():
+    """The exact case Konrad measured. A format we do not read is not a forgery."""
+    from inspect_receipts.receipt import verify
+    r = verify({"schema": "proofbundle/v0.1", "content_id": "x", "signature": {}})
+    assert r.state == "UNCHECKABLE", r.reason
+    assert r.valid is False          # a caller written against the bool stays safe
+    assert "unsupported schema" in r.reason
+
+
+def test_tampered_bytes_are_still_invalid():
+    """The fix must not soften a real finding."""
+    from inspect_receipts.receipt import verify
+    r = verify({
+        "schema": "csoai.inspect-receipt/0.2", "content_id": "deadbeef",
+        "signature": {"status": "SIGNED", "sig": "AA", "kid": "k"},
+    })
+    assert r.state == "INVALID", r.reason
+
+
+def test_missing_trust_anchor_is_uncheckable():
+    """No keys supplied is a fact about the call, not about the receipt."""
+    import inspect_receipts.receipt as m
+    r = m._uncheckable("no trust anchor; resolve kid 'k' via did:web")
+    assert r.state == "UNCHECKABLE" and r.valid is False
+
+
+def test_uncheckable_never_reports_as_valid():
+    """UNCHECKABLE must never be truthy — nothing that failed before starts passing."""
+    import inspect_receipts.receipt as m
+    for r in (m._uncheckable("x"), m._invalid("y")):
+        assert r.valid is False
+    assert m._valid("z").valid is True and m._valid("z").state == "VALID"
