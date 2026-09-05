@@ -158,8 +158,21 @@ def _sample_eval_log() -> object:
 
 
 def test_jcs_known_answer_vectors():
-    """RFC 8785 divergence vectors from proofbundle#147."""
-    assert jcs({"\ufffd": 1, "\U0001f600": 2}) == '{"\\ud83d\\ude00":2,"\\ufffd":1}'
+    """RFC 8785 divergence vectors from proofbundle#147.
+
+    CORRECTED. This test previously asserted the ESCAPED form —
+    ``{"\\ud83d\\ude00":2,"\\ufffd":1}`` — as the expected answer. That is the
+    ``ensure_ascii=True`` output the encoder happened to produce, not RFC 8785. The test
+    therefore pinned the defect in place while its own name promised conformance to the
+    specification, which is why the false claim in canonical.py survived a green suite for as
+    long as it did.
+
+    RFC 8785 §3.2.2.2 serialises strings with minimal escaping over raw UTF-8, so a non-ASCII
+    character appears as itself. The KEY ORDER was already right in both forms and is unchanged
+    here: sorting is by UTF-16 code unit, and U+1F600 leads with the high surrogate 0xD83D,
+    which sorts before U+FFFD.
+    """
+    assert jcs({"\ufffd": 1, "\U0001f600": 2}) == '{"\U0001f600":2,"\ufffd":1}'
     assert jcs({"a": 1e-07}) == '{"a":1e-7}'
     assert jcs({"a": 2.0}) == '{"a":2}'
 

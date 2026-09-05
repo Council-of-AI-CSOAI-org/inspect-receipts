@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "inspect-signed-receipt"
-version = "0.2.1"
+version = "0.3.0"
 description = "Ed25519-signed measurement receipts for Inspect AI eval runs — evidence of what was claimed and when, offline-verifiable against a published did:web key. Measurement, not certification."
 readme = "README.md"
 requires-python = ">=3.10"
