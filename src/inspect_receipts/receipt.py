@@ -4,7 +4,7 @@ Register: a receipt is non-repudiable evidence of WHAT WAS CLAIMED AND WHEN —
 it is not proof that an eval is honest, uncontaminated, or correct. Measurement,
 not certification. Nobody ranked pays; humans never pay.
 
-Schema: csoai.inspect-receipt/0.2
+Schema: csoai.inspect-receipt/0.3
 
 Canonicalisation
 ----------------
@@ -35,11 +35,37 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import (
 
 from .canonical import canonical_bytes, jcs
 
-SCHEMA = "csoai.inspect-receipt/0.2"
+SCHEMA = "csoai.inspect-receipt/0.3"
 
-# Live trust root — keys at https://csoai.org/.well-known/did.json (also councilof.ai mirror).
-DID_WEB = "did:web:csoai.org"
-DID_DOC_URL = "https://csoai.org/.well-known/did.json"
+# THE TRUST ANCHOR IS THE EMITTER'S FIELD, NEVER THIS PACKAGE'S.
+#
+# These are CSOAI's own values. They are the default only because this estate publishes the
+# package; they are not a property of the format. base_receipt() previously stamped them into
+# every receipt unconditionally, so a third party emitting with this library produced receipts
+# claiming did:web:csoai.org — our root asserted over someone else's evidence. That is the
+# defect proofbundle#147 names: "a default in code outweighs a sentence in prose."
+#
+# Set INSPECT_RECEIPTS_DID and INSPECT_RECEIPTS_DID_DOC to emit under your own root. A verifier
+# resolves the anchor from the receipt it was handed (verify.did_document), not from here.
+ESTATE_DID_WEB = "did:web:csoai.org"
+ESTATE_DID_DOC_URL = "https://csoai.org/.well-known/did.json"
+ENV_DID = "INSPECT_RECEIPTS_DID"
+ENV_DID_DOC = "INSPECT_RECEIPTS_DID_DOC"
+
+
+def emitter_did() -> str:
+    """The DID this installation signs under — the emitter's, not the format's."""
+    return os.environ.get(ENV_DID, ESTATE_DID_WEB)
+
+
+def emitter_did_doc() -> str:
+    """The DID document URL this installation publishes its keys at."""
+    return os.environ.get(ENV_DID_DOC, ESTATE_DID_DOC_URL)
+
+
+# Retained for callers that imported them; they are this estate's values, not a default anchor.
+DID_WEB = ESTATE_DID_WEB
+DID_DOC_URL = ESTATE_DID_DOC_URL
 # Eval / measurement-chain receipts: estate-chain key (pod-held, board chains + eval receipts).
 DEFAULT_KID = f"{DID_WEB}#estate-chain-1"
 
@@ -465,9 +491,23 @@ def verify(
 
 
 def verify_against_did_web(
-    receipt: dict, did_url: str = DID_DOC_URL
+    receipt: dict, did_url: str | None = None
 ) -> VerifyResult:
-    """Stranger path: fetch did:web document and verify with mandatory kid resolution."""
+    """Stranger path: fetch the did:web document named BY THE RECEIPT and verify.
+
+    The anchor is read from the receipt's own ``verify.did_document``. It used to default to
+    this estate's document, which meant a stranger verifying someone else's receipt silently
+    checked it against CSOAI's keys — and a receipt signed by a third party came back
+    UNCHECKABLE or worse for the wrong reason. Passing ``did_url`` explicitly still wins, for
+    the case where the caller has out-of-band knowledge of the issuer's key location.
+    """
+    if did_url is None:
+        did_url = ((receipt or {}).get("verify") or {}).get("did_document")
+    if not did_url:
+        return _uncheckable(
+            "receipt names no verify.did_document, and no did_url was supplied — "
+            "there is no anchor to resolve, so nothing was established either way"
+        )
     try:
         keys = resolve_did_web(did_url)
         return verify(receipt, trust_keys=keys)
@@ -496,8 +536,8 @@ def base_receipt(kind: str, data: dict) -> dict:
                 "signature verified against signature.kid resolved from did:web."
             ),
             "canonicalization": "RFC 8785 (JCS)",
-            "did": DID_WEB,
-            "did_document": DID_DOC_URL,
+            "did": emitter_did(),
+            "did_document": emitter_did_doc(),
             "command": "inspect-receipts verify <this-file> --did-web",
             "anchoring": (
                 "Ed25519 signature + SHA-256 content-hash binding only. "

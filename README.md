@@ -120,3 +120,26 @@ pytest -q            # or: python tests/test_receipt.py
 `0.2.1`. Coordinate-first: answers Inspect issue
 [#4413](https://github.com/UKGovernmentBEIS/inspect_ai/issues/4413) with a common
 signed-receipt envelope. License: Apache-2.0.
+
+## Where these properties were worked out
+
+Four of the properties this package documents as design decisions were not arrived at here.
+They came out of a public measurement series with [proofbundle](https://github.com/b7n0de/proofbundle),
+run against named commits in both directions:
+
+- **RFC 8785 canonicalisation (R1)** — [proofbundle#147](https://github.com/b7n0de/proofbundle/issues/147).
+  Our encoder ran `ensure_ascii=True` while claiming JCS; it diverged on 4 of the 6 named
+  vectors. Corrected in 0.3.0, which changes `content_id` for any non-ASCII body.
+- **A foreign schema id is its own outcome, not invalid (R2)** — same issue, E1.
+- **`binding_checked` is true only when the digest was present *and* compared (R3)** — same issue, E2.
+- **Key resolution fails closed (R4)** — the key-resolution probes in that series.
+
+The envelope profile is `proofbundle/receipt-envelope-profile/v0.1`, which lives in
+[proofbundle](https://github.com/b7n0de/proofbundle/blob/main/docs/RECEIPT_ENVELOPE_PROFILE.md)
+and is archived at [10.5281/zenodo.22209671](https://doi.org/10.5281/zenodo.22209671). It keeps
+its name and its home there; this is an independent implementation of it, not a second copy of
+the profile. Conformance is shown by running that profile's probes and posting the result — it
+is never conferred, and no party is appointed to judge another's.
+
+The trust anchor is the emitter's field. `did:web:csoai.org` is CSOAI's value, not the format's;
+set `INSPECT_RECEIPTS_DID` / `INSPECT_RECEIPTS_DID_DOC` to emit under your own root.
