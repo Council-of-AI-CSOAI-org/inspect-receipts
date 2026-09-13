@@ -1,10 +1,15 @@
-# inspect-receipts — Ed25519-signed measurement receipts for Inspect
+# inspect-receipts source — `inspect-signed-receipt` on PyPI
+
+This is the canonical CSOAI implementation. The repository is named
+`inspect-receipts`; the distribution published on PyPI is
+[`inspect-signed-receipt`](https://pypi.org/project/inspect-signed-receipt/), and
+the installed command is `inspect-receipts`.
 
 [![22 axes measured · 14 model fleets · 3 public leader scores · 8 fact runs · TIE is TIE · not a certificate. Three states only: VALID · INVALID · UNCHECKABLE.](https://councilof.ai/badge/gspc.svg)](https://councilof.ai/gspc-verify)
 
 UK AISI's [Inspect](https://github.com/UKGovernmentBEIS/inspect_ai) is the
 standard eval framework, but it has no cryptographic signing of results.
-`inspect-receipts` fills that gap: a small, dependency-light package that hooks
+`inspect-signed-receipt` fills that gap: a small, dependency-light package that hooks
 Inspect's lifecycle and emits an **Ed25519-signed, hash-chained,
 offline-verifiable measurement receipt** for every task and run.
 
@@ -46,7 +51,7 @@ predicates, and benchmarks stay closed and are not in this repo.
 ## Install
 
 ```bash
-pip install inspect-receipts        # once published to PyPI (owner-gated)
+pip install inspect-signed-receipt
 # or from source:
 pip install -e .
 ```
@@ -117,7 +122,8 @@ pytest -q            # or: python tests/test_receipt.py
 
 ## Status
 
-`0.2.1`. Coordinate-first: answers Inspect issue
+Source tree: `0.3.0`. Latest published PyPI release checked 2026-09-13:
+`0.2.0`. Coordinate-first: answers Inspect issue
 [#4413](https://github.com/UKGovernmentBEIS/inspect_ai/issues/4413) with a common
 signed-receipt envelope. License: Apache-2.0.
 
