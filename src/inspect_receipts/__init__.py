@@ -19,14 +19,18 @@ from .receipt import (
     unsigned,
     verify,
     verify_against_did_web,
+    verify_chain,
+    ChainResult,
 )
 
-__version__ = "0.3.0"
+__version__ = "0.3.1"
 
 __all__ = [
     "SCHEMA",
     "Signer",
     "VerifyResult",
+    "ChainResult",
+    "verify_chain",
     "base_receipt",
     "canonical_bytes",
     "content_hash_binding",

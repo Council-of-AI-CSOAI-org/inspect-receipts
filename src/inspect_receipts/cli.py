@@ -13,6 +13,14 @@
       signature must verify under the PUBLISHED key resolved from the receipt's
       kid (default did document: https://csoai.org/.well-known/did.json).
       Exit 1 on any failure.
+
+  inspect-receipts verify --chain <receipt.json> [...] [--did-web [URL]]
+                          [--head CONTENT_ID] [--count N] [--ordered] [--partial]
+      Also verify the files as ONE complete hash chain: every signed ``prev`` link
+      must hold, with no gap, fork, duplicate or second chain. --head / --count check
+      the end against a head published elsewhere (a truncated tail is otherwise not
+      detectable). --ordered also requires the files to be given in chain order.
+      --partial allows a chain that does not start at its first receipt.
 """
 
 from __future__ import annotations
@@ -33,6 +41,7 @@ from .receipt import (
     unsigned,
     verify,
     verify_against_did_web,
+    verify_chain,
 )
 
 
@@ -123,10 +132,23 @@ def _cmd_verify(rest: list[str]) -> int:
     did_web = False
     did_url = DID_DOC_URL
     files: list[str] = []
+    chain = ordered = partial = False
+    head: str | None = None
+    count: int | None = None
     it = iter(rest)
     for a in it:
         if a == "--did-web":
             did_web = True
+        elif a == "--chain":
+            chain = True
+        elif a == "--ordered":
+            ordered = True
+        elif a == "--partial":
+            partial = True
+        elif a == "--head":
+            head = next(it, None)
+        elif a == "--count":
+            count = int(next(it, "-1"))
         elif a.startswith("http://") or a.startswith("https://") or a.startswith("file://"):
             did_url = a  # optional custom did document URL
         else:
@@ -135,6 +157,8 @@ def _cmd_verify(rest: list[str]) -> int:
         print("usage: inspect-receipts verify <receipt.json> [...] [--did-web [URL]]")
         return 2
     failed = 0
+    receipts: list[dict] = []
+    results = []
     for p in files:
         receipt = json.loads(Path(p).read_text(encoding="utf-8"))
         if did_web:
@@ -143,6 +167,15 @@ def _cmd_verify(rest: list[str]) -> int:
             result = verify(receipt)
         print(f"{p}: {result.reason}")
         failed += 0 if result.valid else 1
+        receipts.append(receipt)
+        results.append(result)
+    if chain:
+        cr = verify_chain(
+            receipts, expected_head=head, expected_count=count,
+            require_genesis=not partial, ordered=ordered, member_results=results,
+        )
+        print(f"chain: {cr.reason}")
+        failed += 0 if cr.valid else 1
     return 1 if failed else 0
 
 
