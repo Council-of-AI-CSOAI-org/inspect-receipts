@@ -23,6 +23,7 @@ defensively (in addition to Inspect's own guard around hooks).
 from __future__ import annotations
 
 import os
+import uuid
 
 from inspect_ai.hooks import Hooks, RunEnd, TaskEnd, hooks
 
@@ -40,6 +41,10 @@ from .receipt import (
 # Lightweight per-process hash chain: each receipt links the previous one's
 # content_id. This is the SHA-256 hash-chain referenced in the README.
 _LAST_CID: str | None = None
+# Signed position in that chain (GHSA-ph7v-hpjr-8qj6): a per-process chain id and a
+# sequence number, so verify_chain() can see a gap or a mixed set from the bytes alone.
+_CHAIN_ID: str | None = None
+_SEQ: int = 0
 
 
 def _enabled() -> bool:
@@ -53,11 +58,16 @@ def _envelope(payload: dict) -> dict:
 
 
 def _emit(kind: str, data: dict, stem: str) -> None:
-    global _LAST_CID
+    global _LAST_CID, _CHAIN_ID, _SEQ
+    if _CHAIN_ID is None:
+        _CHAIN_ID = uuid.uuid4().hex
     if data.get("prev") is None:
         data = {**data, "prev": _LAST_CID}
+    if data.get("chain") is None:
+        data = {**data, "chain": {"id": _CHAIN_ID, "seq": _SEQ}}
     receipt = _envelope(base_receipt(kind, data))
     _LAST_CID = receipt.get("content_id")
+    _SEQ += 1
     write_receipt(receipt, stem)
 
 

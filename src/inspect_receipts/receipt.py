@@ -516,6 +516,150 @@ def verify_against_did_web(
         return _uncheckable(f"could not resolve did:web: {type(e).__name__}: {e}")
 
 
+
+# --------------------------------------------------------------------------- #
+# Chain verification (GHSA-ph7v-hpjr-8qj6)
+# --------------------------------------------------------------------------- #
+# verify() checks one receipt. A SET of receipts also makes a claim: that it is the
+# whole chain, in order. Each receipt's signed ``prev`` names the content_id of the
+# one before it, and receipts emitted by 0.3.1+ also carry a signed
+# ``chain = {"id", "seq"}``. verify_chain() walks those links. Without it, anyone
+# holding signed receipts could drop or reorder them and every survivor would
+# still verify. A missing TAIL can only be detected against a head published
+# somewhere else (expected_head / expected_count): no receipt can sign the fact
+# that nothing came after it.
+
+
+@dataclass
+class ChainResult:
+    """Outcome of verifying a set of receipts as one hash chain."""
+
+    valid: bool
+    reason: str
+    state: str = "INVALID"
+    order: tuple = ()
+    members: tuple = ()
+    tail_checked: bool = False
+
+    @property
+    def uncheckable(self) -> bool:
+        return self.state == "UNCHECKABLE"
+
+
+def _chain_invalid(reason: str, **kw) -> ChainResult:
+    return ChainResult(False, f"INVALID — {reason}", state="INVALID", **kw)
+
+
+def verify_chain(
+    receipts: list[dict],
+    trust_keys: dict[str, bytes] | None = None,
+    *,
+    expected_head: str | None = None,
+    expected_count: int | None = None,
+    require_genesis: bool = True,
+    ordered: bool = False,
+    member_results: list[VerifyResult] | None = None,
+) -> ChainResult:
+    """Verify a set of receipts as ONE complete, ordered hash chain.
+
+    Fails closed (INVALID) on: any member that is itself INVALID; a duplicate
+    content_id; two receipts naming the same ``prev`` (fork); a ``prev`` that
+    points outside the set (gap), including a missing first receipt when
+    ``require_genesis``; more than one chain; ``chain.seq`` that does not step by
+    one, or a ``chain.id`` that changes; with ``ordered=True``, an input order
+    that differs from the signed link order; a head or count that differs from
+    ``expected_head`` / ``expected_count``.
+
+    Returns UNCHECKABLE (never VALID) when the links hold but some member could not
+    be checked. VALID without expected_head/expected_count says so: a truncated
+    tail is not detectable from the receipts alone.
+    """
+    receipts = list(receipts or [])
+    if not receipts:
+        return ChainResult(False, "UNCHECKABLE — empty set: there is no chain to check", state="UNCHECKABLE")
+    members = list(member_results) if member_results is not None else [verify(r, trust_keys=trust_keys) for r in receipts]
+    mt = tuple(members)
+    bad = [i for i, m in enumerate(members) if m.state == "INVALID"]
+    if bad:
+        return _chain_invalid(f"member {bad[0]} failed its own check: {members[bad[0]].reason}", members=mt)
+
+    cids = [r.get("content_id") for r in receipts]
+    by_cid: dict[str, int] = {}
+    for i, c in enumerate(cids):
+        if not c:
+            return _chain_invalid(f"member {i} has no content_id", members=mt)
+        if c in by_cid:
+            return _chain_invalid(f"duplicate receipt {c[:16]}… at members {by_cid[c]} and {i}", members=mt)
+        by_cid[c] = i
+
+    child: dict[str | None, int] = {}
+    starts: list[int] = []
+    for i, r in enumerate(receipts):
+        prev = r.get("prev")
+        if prev in child:
+            return _chain_invalid(
+                f"fork: members {child[prev]} and {i} both follow {str(prev)[:16]}…", members=mt
+            )
+        child[prev] = i
+        if prev is None or prev not in by_cid:
+            starts.append(i)
+    if len(starts) != 1:
+        return _chain_invalid(
+            f"{len(starts)} chain starts in one set (members {starts}): a receipt is missing, "
+            "or the set mixes chains", members=mt,
+        )
+    first = starts[0]
+    first_prev = receipts[first].get("prev")
+    if require_genesis and first_prev is not None:
+        return _chain_invalid(
+            f"gap at the start: the first receipt follows {first_prev[:16]}…, which is not in the set",
+            members=mt,
+        )
+
+    order: list[int] = []
+    seen: set[int] = set()
+    cur: int | None = first
+    while cur is not None and cur not in seen:
+        order.append(cur)
+        seen.add(cur)
+        cur = child.get(cids[cur])
+    if len(order) != len(receipts):
+        return _chain_invalid("the links do not form one path through every receipt", members=mt)
+
+    chain_ids = {(receipts[i].get("chain") or {}).get("id") for i in order}
+    seqs = [(receipts[i].get("chain") or {}).get("seq") for i in order]
+    if any(s is not None for s in seqs):
+        if any(s is None for s in seqs):
+            return _chain_invalid("some receipts carry chain.seq and some do not", members=mt)
+        if len(chain_ids) != 1:
+            return _chain_invalid("chain.id changes inside one chain", members=mt)
+        for a, b in zip(seqs, seqs[1:]):
+            if b != a + 1:
+                return _chain_invalid(f"chain.seq jumps from {a} to {b}", members=mt)
+        if require_genesis and seqs[0] != 0:
+            return _chain_invalid(f"the first receipt has chain.seq {seqs[0]}, not 0", members=mt)
+
+    if ordered and order != list(range(len(receipts))):
+        pos = next(k for k, (a, b) in enumerate(zip(order, range(len(receipts)))) if a != b)
+        return _chain_invalid(f"out of order: position {pos} holds member {pos}, but the links put member {order[pos]} there", members=mt)
+
+    head = cids[order[-1]]
+    if expected_head is not None and head != expected_head:
+        return _chain_invalid(f"head is {head[:16]}…, expected {expected_head[:16]}… (tail truncated or wrong chain)", members=mt)
+    if expected_count is not None and len(order) != expected_count:
+        return _chain_invalid(f"{len(order)} receipts, expected {expected_count}", members=mt)
+    tail_checked = expected_head is not None or expected_count is not None
+    otuple = tuple(cids[i] for i in order)
+    if any(m.state == "UNCHECKABLE" for m in members):
+        return ChainResult(False, "UNCHECKABLE — links hold, but at least one member could not be checked",
+                           state="UNCHECKABLE", order=otuple, members=mt, tail_checked=tail_checked)
+    if any(not m.valid for m in members):
+        return ChainResult(False, "NOT VALID — links hold, but not every member verified as VALID",
+                           state="INVALID", order=otuple, members=mt, tail_checked=tail_checked)
+    note = "" if tail_checked else " (tail not checked: pass the published head to detect a truncated end)"
+    return ChainResult(True, f"VALID — {len(order)} receipts, one unbroken chain, head {head[:16]}…{note}",
+                       state="VALID", order=otuple, members=mt, tail_checked=tail_checked)
+
 # --------------------------------------------------------------------------- #
 # Receipt envelope
 # --------------------------------------------------------------------------- #

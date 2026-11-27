@@ -38,6 +38,14 @@ predicates, and benchmarks stay closed and are not in this repo.
 - **Content-addressed + hash-chained.** Each receipt declares a `binding` field
   (`content-hash` today; `merkle` is an optional profile). Verifiers report
   `binding_checked` — what was actually checked, not only pass/fail.
+  Each receipt's signed `prev` names the previous receipt's `content_id`, and
+  receipts from 0.3.1 also carry a signed `chain = {id, seq}`. A single receipt
+  verifies on its own; a **set** is only complete and in order if
+  `inspect-receipts verify --chain <files…>` (or `verify_chain()`) passes. That
+  check fails on a dropped, duplicated, forked or reordered receipt (with
+  `--ordered`). A missing tail cannot be seen from the receipts alone: publish the
+  head `content_id` (or the count) somewhere else and pass `--head` / `--count`.
+  Before 0.3.1 the chain was built but never checked (GHSA-ph7v-hpjr-8qj6).
 - **Verify against a *published* key (mandatory).** `verify()` fails closed unless
   `signature.kid` resolves in the trust anchor (default: **`did:web:csoai.org`**
   at `https://csoai.org/.well-known/did.json`). Self-embedded keys never return
